@@ -1,0 +1,53 @@
+server:
+  port: 8080
+  shutdown: graceful
+spring:
+  application:
+    name: minecraft-control
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  ai:
+    mcp:
+      server:
+        enabled: true
+        protocol: STREAMABLE
+        type: SYNC
+        name: minecraft-bedrock-control
+        version: 0.1.0
+        instructions: >
+          Control and inspect one allowlisted Minecraft Bedrock server. Status and diagnostics are read operations.
+          Start, stop and restart mutate only the configured existing Minecraft container.
+        capabilities:
+          tool: true
+          resource: false
+          prompt: false
+          completion: false
+        streamable-http:
+          mcp-endpoint: /mcp
+minecraft:
+  docker-api-base-url: ${DOCKER_API_BASE_URL:http://docker-api-proxy:2375}
+  container-name: ${MC_CONTAINER_NAME:minecraft-bedrock}
+  lazytainer-container-name: ${LAZYTAINER_CONTAINER_NAME:minecraft-wake}
+  bedrock-host: ${MC_BEDROCK_HOST:minecraft-wake}
+  bedrock-port: ${MC_BEDROCK_PORT:19132}
+  idle-timeout: ${MC_IDLE_TIMEOUT:PT30M}
+  startup-grace: ${MC_STARTUP_GRACE:PT3M}
+  ping-timeout: ${MC_PING_TIMEOUT:PT1S}
+  stop-timeout: ${MC_STOP_TIMEOUT:PT45S}
+  monitor-interval-ms: ${MC_MONITOR_INTERVAL_MS:30000}
+  public-host: ${MC_PUBLIC_HOST:}
+  public-port: ${MC_PUBLIC_PORT:19132}
+  mcp-shared-token: ${MCP_SHARED_TOKEN:}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+logging:
+  level:
+    root: INFO
+    com.example.minecraftcontrol: INFO
