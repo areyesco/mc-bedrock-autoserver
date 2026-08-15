@@ -1,0 +1,139 @@
+name: minecraft-bedrock-auto
+
+services:
+  docker-api-proxy:
+    image: "${DOCKER_API_PROXY_IMAGE:-haproxy:3.2.22-alpine}"
+    container_name: minecraft-docker-api-proxy
+    restart: unless-stopped
+    # HAProxy's official image drops privileges by default. This one small proxy
+    # runs as root only so it can open the host Docker socket and create the
+    # filtered Unix socket consumed by Lazytainer.
+    user: "0:0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker-api-proxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - docker-api-wake:/run/docker-api
+    networks: [docker-api]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:2375/_ping | grep -q OK"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  minecraft-wake:
+    image: "${LAZYTAINER_IMAGE:-ghcr.io/vmorganp/lazytainer:master}"
+    container_name: minecraft-wake
+    restart: unless-stopped
+    depends_on:
+      docker-api-proxy:
+        condition: service_healthy
+    environment:
+      # Important security boundary: Lazytainer reaches only a filtered proxy
+      # over this private Unix socket. The Bedrock container shares its NETWORK
+      # namespace with Lazytainer, but not its filesystem/volumes, so BDS does
+      # not inherit this socket.
+      DOCKER_HOST: "unix:///run/docker-api/docker.sock"
+      VERBOSE: "${LAZYTAINER_VERBOSE:-false}"
+      IPV4_DISABLED: "false"
+      IPV6_DISABLED: "true"
+    volumes:
+      - docker-api-wake:/run/docker-api
+    ports:
+      - "${MC_HOST_PORT:-19132}:19132/udp"
+    labels:
+      lazytainer.group.minecraft.ports: "19132"
+      lazytainer.group.minecraft.minPacketThreshold: "1"
+      lazytainer.group.minecraft.pollRate: "1"
+      # Player-aware Java control is authoritative for sleep. This is only a
+      # long fail-safe if the controller disappears.
+      lazytainer.group.minecraft.inactiveTimeout: "65535"
+      lazytainer.group.minecraft.ignoreActiveClients: "true"
+      lazytainer.group.minecraft.sleepMethod: "stop"
+    networks: [game]
+
+  minecraft-bedrock:
+    image: "${BDS_IMAGE:-itzg/minecraft-bedrock-server:stable}"
+    container_name: minecraft-bedrock
+    restart: "no"
+    depends_on: [minecraft-wake]
+    # This is what lets Lazytainer retain UDP 19132 while BDS is stopped.
+    network_mode: "service:minecraft-wake"
+    labels:
+      lazytainer.group: "minecraft"
+    environment:
+      EULA: "TRUE"
+      VERSION: "${BDS_VERSION:-LATEST}"
+      TZ: "${TZ:-America/Mexico_City}"
+      SERVER_NAME: "${MC_SERVER_NAME:-Minecraft Familiar}"
+      LEVEL_NAME: "${MC_LEVEL_NAME:-Mundo Familiar}"
+      GAMEMODE: "${MC_GAMEMODE:-survival}"
+      DIFFICULTY: "${MC_DIFFICULTY:-normal}"
+      MAX_PLAYERS: "${MC_MAX_PLAYERS:-10}"
+      ONLINE_MODE: "true"
+      ALLOW_CHEATS: "${MC_ALLOW_CHEATS:-false}"
+      ENABLE_LAN_VISIBILITY: "${MC_ENABLE_LAN_VISIBILITY:-true}"
+      SERVER_PORT: "19132"
+      STOP_SERVER_ANNOUNCE_DELAY: "${MC_STOP_ANNOUNCE_SECONDS:-10}"
+      STOP_SERVER_ANNOUNCE: "say Server shutting down in %delay% seconds"
+    volumes:
+      - ./data:/data
+    stop_grace_period: 1m
+
+  minecraft-control:
+    build:
+      context: ./control
+    container_name: minecraft-control
+    restart: unless-stopped
+    depends_on:
+      docker-api-proxy:
+        condition: service_healthy
+      minecraft-wake:
+        condition: service_started
+    environment:
+      TZ: "${TZ:-America/Mexico_City}"
+      DOCKER_API_BASE_URL: "http://docker-api-proxy:2375"
+      MC_CONTAINER_NAME: "minecraft-bedrock"
+      LAZYTAINER_CONTAINER_NAME: "minecraft-wake"
+      MC_BEDROCK_HOST: "minecraft-wake"
+      MC_BEDROCK_PORT: "19132"
+      MC_IDLE_TIMEOUT: "${MC_IDLE_TIMEOUT:-PT30M}"
+      MC_STARTUP_GRACE: "${MC_STARTUP_GRACE:-PT3M}"
+      MC_PING_TIMEOUT: "${MC_PING_TIMEOUT:-PT1S}"
+      MC_STOP_TIMEOUT: "${MC_STOP_TIMEOUT:-PT45S}"
+      MC_MONITOR_INTERVAL_MS: "${MC_MONITOR_INTERVAL_MS:-30000}"
+      MC_PUBLIC_HOST: "${MC_PUBLIC_HOST:-}"
+      MC_PUBLIC_PORT: "${MC_HOST_PORT:-19132}"
+      MCP_SHARED_TOKEN: "${MCP_SHARED_TOKEN:-}"
+    ports:
+      - "127.0.0.1:${CONTROL_HOST_PORT:-8080}:8080"
+    networks: [game, docker-api]
+
+  openai-tunnel:
+    profiles: ["mcp"]
+    image: "${OPENAI_TUNNEL_IMAGE:-ghcr.io/openai/tunnel-client:v0.0.11}"
+    container_name: minecraft-openai-tunnel
+    restart: unless-stopped
+    depends_on: [minecraft-control]
+    environment:
+      CONTROL_PLANE_API_KEY: "${CONTROL_PLANE_API_KEY:-}"
+      CONTROL_PLANE_TUNNEL_ID: "${CONTROL_PLANE_TUNNEL_ID:-}"
+      MCP_SERVER_URL: "http://minecraft-control:8080/mcp"
+      MCP_SHARED_TOKEN: "${MCP_SHARED_TOKEN:-}"
+      MCP_EXTRA_HEADERS: "X-Minecraft-MCP-Token: env:MCP_SHARED_TOKEN"
+      MCP_DISCOVERY_EXTRA_HEADERS: "X-Minecraft-MCP-Token: env:MCP_SHARED_TOKEN"
+      LOG_LEVEL: "${TUNNEL_LOG_LEVEL:-info}"
+      LOG_FORMAT: "json"
+      HEALTH_LISTEN_ADDR: "127.0.0.1:8080"
+    networks: [game]
+
+networks:
+  game:
+    driver: bridge
+  docker-api:
+    driver: bridge
+    internal: true
+
+volumes:
+  # Carries ONLY the filtered proxy socket. It is mounted into Lazytainer, but
+  # not into minecraft-bedrock. network_mode: service:... does not share volumes.
+  docker-api-wake:
