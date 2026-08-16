@@ -16,7 +16,7 @@ spring:
         version: 0.1.0
         instructions: >
           Control and inspect one allowlisted Minecraft Bedrock server. Status and diagnostics are read operations.
-          Start, stop and restart mutate only the configured existing Minecraft container.
+          Start, stop, restart, and allowlist add/remove mutate only the configured existing Minecraft container.
         capabilities:
           tool: true
           resource: false
@@ -34,6 +34,7 @@ minecraft:
   startup-grace: ${MC_STARTUP_GRACE:PT3M}
   ping-timeout: ${MC_PING_TIMEOUT:PT1S}
   stop-timeout: ${MC_STOP_TIMEOUT:PT45S}
+  allowlist-ready-timeout: ${MC_ALLOWLIST_READY_TIMEOUT:PT90S}
   monitor-interval-ms: ${MC_MONITOR_INTERVAL_MS:30000}
   public-host: ${MC_PUBLIC_HOST:}
   public-port: ${MC_PUBLIC_PORT:19132}
