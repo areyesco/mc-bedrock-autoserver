@@ -22,14 +22,17 @@ public class MinecraftControlService {
     private final MinecraftProperties properties;
     private final DockerApiClient docker;
     private final BedrockStatusClient bedrock;
+    private final BedrockAllowlistManager allowlistManager;
     private Instant emptySince;
     private Boolean lastRunning;
     private Integer lastPlayers;
 
-    public MinecraftControlService(MinecraftProperties properties, DockerApiClient docker, BedrockStatusClient bedrock) {
+    public MinecraftControlService(MinecraftProperties properties, DockerApiClient docker, BedrockStatusClient bedrock,
+                                   BedrockAllowlistManager allowlistManager) {
         this.properties = properties;
         this.docker = docker;
         this.bedrock = bedrock;
+        this.allowlistManager = allowlistManager;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -95,6 +98,23 @@ public class MinecraftControlService {
         emptySince = null; lastPlayers = null;
         log.info("Minecraft RESTART requested. reason={}", sanitizeReason(reason));
         return new ControlResult(true, true, "restart", "Minecraft restart requested.", safeStatus());
+    }
+
+    public synchronized AllowlistStatus allowlist() {
+        return allowlistManager.list();
+    }
+
+    public synchronized AllowlistMutationResult addAllowlistPlayer(String gamertag) {
+        // Keep the idle monitor out of this critical section and reset any stale idle countdown.
+        emptySince = null;
+        lastPlayers = null;
+        return allowlistManager.add(gamertag);
+    }
+
+    public synchronized AllowlistMutationResult removeAllowlistPlayer(String gamertag) {
+        emptySince = null;
+        lastPlayers = null;
+        return allowlistManager.remove(gamertag);
     }
 
     @Scheduled(fixedDelayString = "${minecraft.monitor-interval-ms:30000}")
