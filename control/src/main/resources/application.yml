@@ -13,7 +13,7 @@ spring:
         protocol: STREAMABLE
         type: SYNC
         name: minecraft-bedrock-control
-        version: 0.1.0
+        version: 0.2.0
         instructions: >
           Control and inspect one allowlisted Minecraft Bedrock server. Status and diagnostics are read operations.
           Start, stop, restart, and allowlist add/remove mutate only the configured existing Minecraft container.
