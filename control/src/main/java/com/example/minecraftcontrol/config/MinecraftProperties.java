@@ -14,6 +14,7 @@ public record MinecraftProperties(
         Duration startupGrace,
         Duration pingTimeout,
         Duration stopTimeout,
+        Duration allowlistReadyTimeout,
         long monitorIntervalMs,
         String publicHost,
         int publicPort,

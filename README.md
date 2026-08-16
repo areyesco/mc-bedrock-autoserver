@@ -20,6 +20,7 @@ A self-hosted Docker Compose stack for **Minecraft Bedrock** (including Android 
 5. While BDS runs, Java sends a RakNet Unconnected Ping and reads the Bedrock advertisement (`players/maxPlayers/version/MOTD`).
 6. If players remain at zero for `MC_IDLE_TIMEOUT` (30 minutes by default), Java asks Docker to stop BDS.
 7. The itzg image receives a normal `SIGTERM`, announces shutdown for 10 seconds by default, then sends Bedrock's clean `stop` command before Docker's grace period expires.
+8. Authorized MCP users can add/remove Xbox/Microsoft gamertags from Bedrock's allowlist without SSH access to the host.
 
 A failed RakNet status query never advances the idle timer. This deliberately prefers leaving the server running over stopping it because of a monitoring fault.
 
@@ -60,24 +61,32 @@ minecraft-control -- /mcp --> openai-tunnel (optional) -- outbound HTTPS --> Ope
 
 `minecraft-bedrock` uses `network_mode: service:minecraft-wake`. That is required for the wake design, but it means both containers share networking. If Lazytainer were given a TCP route to a Docker API proxy, a compromised BDS process would inherit that network route too.
 
-Instead, Lazytainer gets a **filtered Unix socket** through a named volume. Bedrock shares networking but **does not share Lazytainer's filesystem or volumes**, so it cannot see that socket. Java uses a separate internal Docker network to the same filtered proxy.
+Instead, Lazytainer gets a **filtered Unix socket** through a named volume. Bedrock shares networking but **does not share Lazytainer's filesystem or volumes**, so it cannot see that socket. Java uses a separate internal Docker network to a different filtered frontend on the same proxy.
 
 Only the proxy mounts the raw host Docker socket.
 
 ## Filtered Docker API
 
-Allowed:
+The proxy exposes two policy frontends.
 
-- `GET/HEAD /_ping`
-- `GET/HEAD /version`
-- `GET/HEAD /containers/json`
-- `GET/HEAD /containers/{id-or-name}/json`
-- `POST /containers/{id-or-name}/start`
-- `POST /containers/{id-or-name}/stop`
+**Lazytainer Unix-socket frontend** allows only:
 
-Everything else returns HTTP 403. In particular, there is no create, exec, image pull, volume mount, network mutation or privileged-container path through this proxy.
+- Docker ping/version,
+- container list/inspect,
+- start/stop of existing containers.
 
-See `SECURITY.md` for the threat model and limitations.
+It has **no Docker exec capability**.
+
+**Java TCP frontend**, reachable only on the internal `docker-api` network, allows:
+
+- Docker ping/version and container list/inspect,
+- start/stop of the existing `minecraft-bedrock` container,
+- creation of Docker exec sessions **only in `minecraft-bedrock`**,
+- start/inspect of those exec sessions.
+
+The narrow exec capability is used to call the Bedrock image's bundled `send-command` helper for allowlist changes and to read fixed allowlist/config files for verification. Normal MCP input is not interpolated into shell commands.
+
+There is still no container creation, arbitrary volume mount, image pull, network mutation or privileged-container path through the proxy. See `SECURITY.md` for the threat model and limitations.
 
 ## Existing open-source projects evaluated
 
@@ -90,7 +99,7 @@ See `SECURITY.md` for the threat model and limitations.
 | `itzg/docker-minecraft-bedrock-server` | **Yes** | N/A | clean lifecycle | N/A | N/A | **Yes** | No | **Reuse for BDS** |
 | This integration layer | **Yes** | delegates | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** | Fills the missing gap |
 
-The key design choice is to avoid writing a custom Bedrock UDP proxy. Lazytainer already does the protocol-agnostic traffic detection; Java handles only state, player count, diagnostics and control.
+The key design choice is to avoid writing a custom Bedrock UDP proxy. Lazytainer already does the protocol-agnostic traffic detection; Java handles state, player count, diagnostics, lifecycle and allowlist control.
 
 ## Requirements
 
@@ -119,7 +128,7 @@ Follow logs:
 docker compose logs -f minecraft-control minecraft-wake minecraft-bedrock
 ```
 
-The Java logs report state transitions, player-count changes, idle-timer start/cancel/expiry, Docker diagnostics and the fact that true external UDP reachability needs an outside probe.
+The Java logs report state transitions, player-count changes, idle-timer start/cancel/expiry, Docker diagnostics and allowlist mutations.
 
 ## Automatic wake caveat
 
@@ -137,6 +146,7 @@ MC_STARTUP_GRACE=PT3M
 MC_PING_TIMEOUT=PT1S
 MC_MONITOR_INTERVAL_MS=30000
 MC_STOP_TIMEOUT=PT45S
+MC_ALLOWLIST_READY_TIMEOUT=PT90S
 ```
 
 State machine:
@@ -154,6 +164,31 @@ For a first test use:
 MC_IDLE_TIMEOUT=PT2M
 MC_STARTUP_GRACE=PT30S
 ```
+
+## Bedrock allowlist
+
+Allowlist enforcement defaults to enabled:
+
+```dotenv
+MC_ALLOW_LIST=true
+```
+
+For Bedrock, the simple identifier you need to ask a player for is their **Xbox/Microsoft gamertag as shown in Minecraft**. You do not need to obtain an XUID manually.
+
+The MCP implementation applies changes through Bedrock's live `allowlist add/remove` command and verifies the persisted `allowlist.json` file afterward.
+
+Behavior:
+
+- `minecraft_allowlist_add`: if BDS is stopped, starts it, waits for it to answer RakNet, applies the change and verifies it. The normal idle shutdown will stop BDS later if nobody joins.
+- `minecraft_allowlist_remove`: same lifecycle behavior, then verifies removal.
+- `minecraft_allowlist_list`: read-only and intentionally does **not** wake a stopped server. If BDS is stopped, it reports the list as unavailable.
+- Results also report whether `allow-list=true` is currently being enforced.
+
+Example ChatGPT requests:
+
+- “Agrega `Alex 123` al servidor de Minecraft.”
+- “Quita `Alex 123` de los usuarios permitidos.”
+- “¿Qué jugadores están en la allowlist?”
 
 ## Local REST API
 
@@ -185,6 +220,9 @@ Spring AI exposes Streamable HTTP MCP at `/mcp` with:
 - `minecraft_stop`
 - `minecraft_restart`
 - `minecraft_diagnostics`
+- `minecraft_allowlist_list`
+- `minecraft_allowlist_add`
+- `minecraft_allowlist_remove`
 
 This makes requests such as these possible from an authorized MCP-capable ChatGPT environment:
 
@@ -193,6 +231,8 @@ This makes requests such as these possible from an authorized MCP-capable ChatGP
 - “¿Cuántos jugadores hay?”
 - “Apaga Minecraft.”
 - “Dame los diagnósticos del servidor.”
+- “Agrega el gamertag `Alex 123` al servidor.”
+- “Quita a `Alex 123` de la allowlist.”
 
 ### Secure MCP Tunnel setup
 
@@ -227,11 +267,13 @@ docker compose logs -f openai-tunnel minecraft-control
 
 `MCP_SHARED_TOKEN` is not an OpenAI credential. It is a defense-in-depth secret for the `openai-tunnel -> minecraft-control` hop. The tunnel container injects it into both runtime and discovery requests.
 
-Human authorization is handled through the OpenAI organization/workspace and ChatGPT app/developer-mode permissions. The Java service does not attempt to identify “Gabriel” versus another ChatGPT user by itself.
+Human authorization is handled through the OpenAI organization/workspace and ChatGPT developer-mode/plugin permissions. The Java service does not attempt to identify individual ChatGPT users by itself.
 
 ### MCP transport compatibility note (August 2026)
 
 The project deliberately uses Spring AI `STREAMABLE` transport. It does not depend on stateless MCP behavior. Before relying on MCP as the only control path, smoke-test tool discovery and one read-only `minecraft_status` call in your actual ChatGPT workspace.
+
+After adding new MCP tools, use the ChatGPT plugin's **Scan tools / Refresh tools** action if the new tool definitions are not discovered automatically.
 
 ## Diagnostics: “is port 19132 open?”
 
@@ -264,20 +306,13 @@ World/config data lives in:
 ./data:/data
 ```
 
-Do not delete `./data` when rebuilding containers.
+Do not delete `./data` when rebuilding containers. The Bedrock allowlist is persisted under the same data directory.
 
-## Validation performed on this generated project
+## Validation
 
-The project was checked for:
+The original generated project was checked for YAML/XML/Bash syntax, Java 21 compilation shape, RakNet parsing and Docker-socket isolation. The allowlist feature adds focused JUnit coverage for gamertag validation and keeps Docker exec off the Lazytainer frontend.
 
-- YAML parse of `compose.yaml` and `application.yml`,
-- XML parse of `pom.xml`,
-- Bash syntax for included scripts,
-- Java 21 source compilation shape using local `javac --release 21` with API stubs for external frameworks,
-- RakNet ping builder/parser smoke test using an MCPE advertisement fixture,
-- filesystem/network review to ensure only `docker-api-proxy` mounts the raw Docker socket.
-
-The generation environment did not have Docker Engine/Maven available, so a real `docker compose build/up` and full Maven dependency resolution could not be executed here. Run `./scripts/preflight.sh` and the quick start on the target Linux host; treat the first deployment as an integration test, not as a claim of production certification.
+The repository-writing environment does not provide a Docker Engine/Maven runtime for executing the updated stack, so the final integration build should be performed on the target Linux host with the commands below. Treat the first rebuilt deployment as the integration test for the new allowlist path.
 
 ## Useful commands
 
@@ -299,15 +334,15 @@ docker compose up -d minecraft-control
 # Stop the entire infrastructure (different from letting BDS sleep)
 docker compose down
 
-# Start optional MCP tunnel
+# Start/update optional MCP tunnel
 ./scripts/mcp-up.sh
 ```
 
 ## Recommended next hardening after first successful run
 
-1. Configure Bedrock allowlist entries for the actual players.
+1. Keep the Bedrock allowlist limited to actual players.
 2. Back up `data/` automatically.
 3. Pin tested container digests.
 4. Run your preferred container/SCA vulnerability scanner on the resolved images and Maven dependency tree.
-5. Test MCP with a read-only status call before enabling start/stop for family accounts.
+5. Test MCP with a read-only status call before granting plugin access to other users.
 6. Verify UDP 19132 from a phone on cellular data or another truly external network.

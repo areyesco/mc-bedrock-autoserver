@@ -30,7 +30,7 @@ public class DockerApiClient {
 
     public boolean ping() {
         try {
-            var response = send("GET", "/_ping", Duration.ofSeconds(3));
+            var response = send("GET", "/_ping", Duration.ofSeconds(3), null);
             return response.statusCode() == 200 && response.body().trim().equalsIgnoreCase("OK");
         } catch (Exception e) {
             return false;
@@ -75,6 +75,50 @@ public class DockerApiClient {
         return mutate(containerName, "stop", "?t=" + Math.max(1, timeout.toSeconds()));
     }
 
+    /**
+     * Execute one fixed command inside a running container through Docker's exec API.
+     * The caller controls the argv array; no shell is introduced here.
+     */
+    public ExecResult exec(String containerName, List<String> command, Duration timeout) {
+        if (command == null || command.isEmpty()) throw new IllegalArgumentException("Docker exec command is required");
+        Duration effectiveTimeout = timeout == null || timeout.isZero() || timeout.isNegative()
+                ? Duration.ofSeconds(15) : timeout;
+
+        JsonObject createBody = new JsonObject();
+        createBody.addProperty("AttachStdin", false);
+        createBody.addProperty("AttachStdout", true);
+        createBody.addProperty("AttachStderr", true);
+        // TTY makes the attached response a normal text stream instead of Docker's multiplexed binary framing.
+        createBody.addProperty("Tty", true);
+        JsonArray cmd = new JsonArray();
+        command.forEach(cmd::add);
+        createBody.add("Cmd", cmd);
+
+        String createPath = versioned("/containers/" + encodePathSegment(containerName) + "/exec");
+        var create = sendUnchecked("POST", createPath, Duration.ofSeconds(5), createBody.toString());
+        if (create.statusCode() == 404) throw new IllegalStateException("Docker container not found for exec: " + containerName);
+        require2xx(create, "create exec in " + containerName);
+        JsonObject createJson = JsonParser.parseString(create.body()).getAsJsonObject();
+        String execId = getString(createJson, "Id", null);
+        if (execId == null || execId.isBlank()) throw new IllegalStateException("Docker exec create did not return an Id");
+
+        JsonObject startBody = new JsonObject();
+        startBody.addProperty("Detach", false);
+        startBody.addProperty("Tty", true);
+        String execPath = versioned("/exec/" + encodePathSegment(execId));
+        var started = sendUnchecked("POST", execPath + "/start", effectiveTimeout, startBody.toString());
+        require2xx(started, "start exec " + execId);
+
+        var inspected = sendUnchecked("GET", execPath + "/json", Duration.ofSeconds(5));
+        require2xx(inspected, "inspect exec " + execId);
+        JsonObject inspectJson = JsonParser.parseString(inspected.body()).getAsJsonObject();
+        if (getBoolean(inspectJson, "Running", false)) {
+            throw new IllegalStateException("Docker exec is still running after attached start returned: " + execId);
+        }
+        int exitCode = getInt(inspectJson, "ExitCode", -1);
+        return new ExecResult(exitCode, started.body() == null ? "" : started.body());
+    }
+
     private MutationResult mutate(String containerName, String operation, String query) {
         String path = versioned("/containers/" + encodePathSegment(containerName) + "/" + operation)
                 + (query == null ? "" : query);
@@ -104,14 +148,27 @@ public class DockerApiClient {
     }
 
     private HttpResponse<String> sendUnchecked(String method, String path, Duration timeout) {
-        try { return send(method, path, timeout); }
+        return sendUnchecked(method, path, timeout, null);
+    }
+
+    private HttpResponse<String> sendUnchecked(String method, String path, Duration timeout, String jsonBody) {
+        try { return send(method, path, timeout, jsonBody); }
         catch (IOException e) { throw new IllegalStateException("Docker API I/O error calling " + path + ": " + e.getMessage(), e); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException("Interrupted while calling Docker API " + path, e); }
     }
 
-    private HttpResponse<String> send(String method, String path, Duration timeout) throws IOException, InterruptedException {
+    private HttpResponse<String> send(String method, String path, Duration timeout, String jsonBody) throws IOException, InterruptedException {
         HttpRequest.Builder builder = HttpRequest.newBuilder().uri(URI.create(baseUrl + path)).timeout(timeout).header("Accept", "application/json");
-        if ("POST".equals(method)) builder.POST(HttpRequest.BodyPublishers.noBody()); else builder.GET();
+        if ("POST".equals(method)) {
+            if (jsonBody == null) {
+                builder.POST(HttpRequest.BodyPublishers.noBody());
+            } else {
+                builder.header("Content-Type", "application/json");
+                builder.POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8));
+            }
+        } else {
+            builder.GET();
+        }
         return httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 
@@ -130,10 +187,12 @@ public class DockerApiClient {
     }
     private static String getString(JsonObject o, String p, String d) { JsonElement e=o.get(p); return e==null||e.isJsonNull()?d:e.getAsString(); }
     private static boolean getBoolean(JsonObject o, String p, boolean d) { JsonElement e=o.get(p); return e==null||e.isJsonNull()?d:e.getAsBoolean(); }
+    private static int getInt(JsonObject o, String p, int d) { JsonElement e=o.get(p); return e==null||e.isJsonNull()?d:e.getAsInt(); }
     private static Instant parseInstant(String value) {
         if (value == null || value.isBlank() || value.startsWith("0001-")) return null;
         try { return Instant.parse(value); } catch (DateTimeParseException ignored) { return null; }
     }
 
     public record MutationResult(boolean changed, String message) {}
+    public record ExecResult(int exitCode, String output) {}
 }
