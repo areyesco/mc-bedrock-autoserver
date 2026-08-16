@@ -24,6 +24,24 @@ public class BedrockAllowlistManager {
     private static final Duration EXEC_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration VERIFY_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration VERIFY_POLL = Duration.ofMillis(250);
+    private static final String SEND_COMMAND_SCRIPT = """
+            command_line=$1
+            for proc in /proc/[0-9]*; do
+              [ -r "$proc/comm" ] || continue
+              IFS= read -r comm < "$proc/comm" || continue
+              case "$comm" in
+                bedrock_server-*|box64)
+                  uid=$(awk '/^Uid:/ { print $2; exit }' "$proc/status")
+                  gid=$(awk '/^Gid:/ { print $2; exit }' "$proc/status")
+                  [ -n "$uid" ] && [ -n "$gid" ] || exit 3
+                  exec setpriv --reuid="$uid" --regid="$gid" --clear-groups \
+                    sh -c 'printf "%s\\n" "$2" > "$1"' send-command "$proc/fd/0" "$command_line"
+                  ;;
+              esac
+            done
+            echo "ERROR: unable to find bedrock server process" >&2
+            exit 2
+            """;
 
     private final MinecraftProperties properties;
     private final DockerApiClient docker;
@@ -113,9 +131,9 @@ public class BedrockAllowlistManager {
     }
 
     private void runAllowlistCommand(String action, String gamertag) {
-        String quotedGamertag = "\"" + gamertag + "\"";
+        String commandLine = "allowlist " + action + " \"" + gamertag + "\"";
         DockerApiClient.ExecResult result = docker.exec(properties.containerName(),
-                List.of("send-command", "allowlist", action, quotedGamertag), EXEC_TIMEOUT);
+                List.of("sh", "-c", SEND_COMMAND_SCRIPT, "send-command", commandLine), EXEC_TIMEOUT);
         if (result.exitCode() != 0) {
             String output = result.output() == null ? "" : result.output().trim();
             if (output.length() > 300) output = output.substring(0, 300) + "...";

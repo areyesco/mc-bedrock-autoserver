@@ -7,7 +7,7 @@ The stack deliberately avoids giving the Java control service or Lazytainer the 
 - Only `docker-api-proxy` mounts `/var/run/docker.sock`.
 - HAProxy exposes **two different filtered frontends**: a TCP frontend for Java and a Unix-socket frontend for Lazytainer.
 - The Java frontend permits Docker ping/version, container list/inspect, start/stop for the existing `minecraft-bedrock` container, and the minimum Docker exec endpoints needed to operate **only that same container**.
-- The Java Docker-exec capability is used for Bedrock's bundled `send-command` helper and fixed reads of `/data/server.properties` and `/data/allowlist.json`. MCP input is never interpolated into a shell command.
+- The Java Docker-exec capability is used by a fixed Bedrock console-command bridge and for fixed reads of `/data/server.properties` and `/data/allowlist.json`. The bridge matches only the Bedrock process, drops to its UID/GID and writes the command to its stdin. MCP input is never interpolated into a shell command.
 - Lazytainer's Unix-socket frontend retains only ping/version, container list/inspect, and start/stop. It **cannot** create, start, or inspect Docker exec sessions.
 - Java reaches its filtered proxy frontend on an `internal: true` Docker network that is not attached to the Bedrock/wake network namespace.
 - Lazytainer reaches its filtered frontend through `/run/docker-api/docker.sock`, a **proxy-created Unix socket in a named volume**.
@@ -23,7 +23,7 @@ Mounting `/var/run/docker.sock:ro` does **not** make the Docker API read-only; U
 
 The proxy still cannot create containers, attach arbitrary volumes, pull images, create privileged workloads, or modify networks. The Java frontend now has a deliberately narrow additional capability: it can create Docker exec sessions only in the pre-existing `minecraft-bedrock` container and can start/inspect those exec sessions. A compromise of `minecraft-control` should therefore be treated as potential command execution **inside the Bedrock container**, but it does not grant the application a raw Docker socket or the ability to create a privileged container or mount host paths.
 
-The MCP allowlist implementation further constrains normal use: the player-supplied gamertag is passed as one argument to the fixed `send-command allowlist add/remove` command. Fixed shell commands are used only to read known files under `/data`; user input is not included in those shell strings.
+The MCP allowlist implementation further constrains normal use: the player-supplied gamertag is passed as one argument to the fixed console-command bridge for `allowlist add/remove`. Fixed shell commands are used only for that bridge and to read known files under `/data`; user input is not included in those shell strings.
 
 ## MCP identity and authorization
 

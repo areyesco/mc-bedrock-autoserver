@@ -84,7 +84,7 @@ It has **no Docker exec capability**.
 - creation of Docker exec sessions **only in `minecraft-bedrock`**,
 - start/inspect of those exec sessions.
 
-The narrow exec capability is used to call the Bedrock image's bundled `send-command` helper for allowlist changes and to read fixed allowlist/config files for verification. Normal MCP input is not interpolated into shell commands.
+The narrow exec capability is used by a fixed console-command bridge for allowlist changes and to read fixed allowlist/config files for verification. The bridge locates only the Bedrock process, drops to that process's UID/GID and writes to its stdin. Normal MCP input is passed as an argument and is not interpolated into shell commands.
 
 There is still no container creation, arbitrary volume mount, image pull, network mutation or privileged-container path through the proxy. See `SECURITY.md` for the threat model and limitations.
 
@@ -129,6 +129,7 @@ docker compose logs -f minecraft-control minecraft-wake minecraft-bedrock
 ```
 
 The Java logs report state transitions, player-count changes, idle-timer start/cancel/expiry, Docker diagnostics and allowlist mutations.
+Each service uses Docker's `json-file` log driver with one file capped at 10 MB, so container logs cannot grow indefinitely.
 
 ## Automatic wake caveat
 

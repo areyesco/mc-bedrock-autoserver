@@ -1,10 +1,17 @@
 name: minecraft-bedrock-auto
 
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "1"
+
 services:
   docker-api-proxy:
     image: "${DOCKER_API_PROXY_IMAGE:-haproxy:3.2.22-alpine}"
     container_name: minecraft-docker-api-proxy
     restart: unless-stopped
+    logging: *bounded-logging
     # HAProxy's official image drops privileges by default. This one small proxy
     # runs as root only so it can open the host Docker socket and create the
     # filtered Unix socket consumed by Lazytainer.
@@ -24,6 +31,7 @@ services:
     image: "${LAZYTAINER_IMAGE:-ghcr.io/vmorganp/lazytainer:master}"
     container_name: minecraft-wake
     restart: unless-stopped
+    logging: *bounded-logging
     depends_on:
       docker-api-proxy:
         condition: service_healthy
@@ -55,6 +63,7 @@ services:
     image: "${BDS_IMAGE:-itzg/minecraft-bedrock-server:stable}"
     container_name: minecraft-bedrock
     restart: "no"
+    logging: *bounded-logging
     depends_on: [minecraft-wake]
     # This is what lets Lazytainer retain UDP 19132 while BDS is stopped.
     network_mode: "service:minecraft-wake"
@@ -85,6 +94,7 @@ services:
       context: ./control
     container_name: minecraft-control
     restart: unless-stopped
+    logging: *bounded-logging
     depends_on:
       docker-api-proxy:
         condition: service_healthy
@@ -109,13 +119,22 @@ services:
     ports:
       - "127.0.0.1:${CONTROL_HOST_PORT:-8080}:8080"
     networks: [game, docker-api]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
   openai-tunnel:
     profiles: ["mcp"]
     image: "${OPENAI_TUNNEL_IMAGE:-ghcr.io/openai/tunnel-client:v0.0.11}"
     container_name: minecraft-openai-tunnel
     restart: unless-stopped
-    depends_on: [minecraft-control]
+    logging: *bounded-logging
+    depends_on:
+      minecraft-control:
+        condition: service_healthy
     environment:
       CONTROL_PLANE_API_KEY: "${CONTROL_PLANE_API_KEY:-}"
       CONTROL_PLANE_TUNNEL_ID: "${CONTROL_PLANE_TUNNEL_ID:-}"
