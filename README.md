@@ -16,7 +16,7 @@ A self-hosted Docker Compose stack for **Minecraft Bedrock** (including Android 
 1. When BDS is stopped, Lazytainer remains alive and owns the published host mapping `UDP 19132`.
 2. A Minecraft connection attempt produces traffic; Lazytainer asks the **filtered** Docker API to start the existing BDS container.
 3. BDS shares Lazytainer's network namespace, so it receives the same traffic path once running.
-4. The Java controller never pings BDS while Docker says it is stopped, so monitoring cannot accidentally wake it.
+4. The Java controller never pings BDS while Docker says it is stopped. After a controller-driven stop it restarts only Lazytainer, clearing the pre-stop packet history so the final player-count probes cannot immediately wake BDS again.
 5. While BDS runs, Java sends a RakNet Unconnected Ping and reads the Bedrock advertisement (`players/maxPlayers/version/MOTD`).
 6. If players remain at zero for `MC_IDLE_TIMEOUT` (30 minutes by default), Java asks Docker to stop BDS.
 7. The itzg image receives a normal `SIGTERM`, announces shutdown for 10 seconds by default, then sends Bedrock's clean `stop` command before Docker's grace period expires.

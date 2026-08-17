@@ -75,6 +75,10 @@ public class DockerApiClient {
         return mutate(containerName, "stop", "?t=" + Math.max(1, timeout.toSeconds()));
     }
 
+    public MutationResult restart(String containerName, Duration timeout) {
+        return mutate(containerName, "restart", "?t=" + Math.max(1, timeout.toSeconds()));
+    }
+
     /**
      * Execute one fixed command inside a running container through Docker's exec API.
      * The caller controls the argv array; no shell is introduced here.

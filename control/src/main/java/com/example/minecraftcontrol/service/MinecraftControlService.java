@@ -19,6 +19,7 @@ import java.util.Objects;
 @Service
 public class MinecraftControlService {
     private static final Logger log = LoggerFactory.getLogger(MinecraftControlService.class);
+    private static final Duration WAKE_RESTART_TIMEOUT = Duration.ofSeconds(10);
     private final MinecraftProperties properties;
     private final DockerApiClient docker;
     private final BedrockStatusClient bedrock;
@@ -86,6 +87,7 @@ public class MinecraftControlService {
             return new ControlResult(true, false, "stop", "Minecraft is already stopped.", safeStatus());
         }
         var result = docker.stop(properties.containerName(), properties.stopTimeout());
+        resetWakePacketHistory();
         emptySince = null; lastPlayers = null;
         log.info("Minecraft STOP requested. reason={}", sanitizeReason(reason));
         return new ControlResult(true, result.changed(), "stop", "Minecraft stop requested with a graceful timeout.", safeStatus());
@@ -154,6 +156,7 @@ public class MinecraftControlService {
             if (idle.compareTo(properties.idleTimeout()) >= 0) {
                 log.info("Idle timeout reached after {} with zero players. Stopping Minecraft gracefully.", idle);
                 docker.stop(properties.containerName(), properties.stopTimeout());
+                resetWakePacketHistory();
                 emptySince = null; lastPlayers = null;
             }
         } catch (Exception e) {
@@ -165,6 +168,23 @@ public class MinecraftControlService {
         if (lastRunning == null || lastRunning != container.running()) {
             log.info("Minecraft container state transition: running={}, status={}", container.running(), container.status());
             lastRunning = container.running();
+        }
+    }
+
+    /**
+     * Lazytainer keeps a rolling packet history while Bedrock is running. The final
+     * status probes used to decide an idle shutdown remain in that history and would
+     * otherwise satisfy its wake threshold as soon as Bedrock stops. Restarting only
+     * the always-on wake container clears that in-memory history while preserving its
+     * network configuration, published UDP port and the stopped Bedrock container.
+     */
+    private void resetWakePacketHistory() {
+        try {
+            docker.restart(properties.lazytainerContainerName(), WAKE_RESTART_TIMEOUT);
+            log.info("Lazytainer restarted after Minecraft stop to clear pre-stop packet history.");
+        } catch (Exception e) {
+            log.error("Minecraft stopped, but Lazytainer packet history could not be reset; an immediate false wake is possible. {}",
+                    e.getMessage(), e);
         }
     }
 
