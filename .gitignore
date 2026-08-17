@@ -3,3 +3,4 @@ data/*
 !data/.gitkeep
 control/target/
 *.log
+docs/*
